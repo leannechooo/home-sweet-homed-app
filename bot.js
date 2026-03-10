@@ -5,34 +5,61 @@ dotenv.config();
 const bot = new Bot(process.env.BOT_TOKEN);
 
 // ── Store active polls in memory ───────────────────────────────────────────
-// { chatId: { messageId, votes: { userId: { name, status } } } }
+// { chatId: { messageId, totalMembers, votes: { userId: { name, status } } } }
 const activePolls = {};
+
+// ── Helper: build the poll message text ───────────────────────────────────
+function buildPollText(poll) {
+  const statusEmoji = { yes: "🏠", otw: "🚶", check: "🫂" };
+  const statusLabel = { yes: "I'm Home!", otw: "On the Way", check: "Check in on Me" };
+
+  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
+  const total = poll.totalMembers;
+
+  const voted = Object.values(poll.votes)
+    .map((v) => `${statusEmoji[v.status]} ${v.name} — ${statusLabel[v.status]}`)
+    .join("\n");
+
+  const notVotedCount = total - Object.keys(poll.votes).length;
+  const waiting = notVotedCount > 0
+    ? "\n" + [...Array(notVotedCount)].map(() => "⏳ Waiting...").join("\n")
+    : "";
+
+  return (
+    `🏡 *Are You Home Yet?*\n\n` +
+    `${voted}${waiting}\n\n` +
+    `🏠 *${homeCount}/${total} are home*`
+  );
+}
+
+// ── Helper: build the keyboard ─────────────────────────────────────────────
+function buildKeyboard() {
+  return new InlineKeyboard()
+    .text("🏠 I'm Home!", "vote_yes")
+    .text("🚶 On the Way", "vote_otw")
+    .row()
+    .text("🫂 Check in on Me", "vote_check");
+}
 
 // ── /checkin command ───────────────────────────────────────────────────────
 bot.command("checkin", async (ctx) => {
   const chatId = ctx.chat.id;
 
-  // Only works in group chats
   if (ctx.chat.type === "private") {
     await ctx.reply("Please add me to a group chat and use /checkin there! 🏠");
     return;
   }
 
-  // Reset poll for this chat
-  activePolls[chatId] = { votes: {} };
+  const rawCount = await ctx.api.getChatMemberCount(chatId);
+  const totalMembers = rawCount - 1;
 
-  const keyboard = new InlineKeyboard()
-    .text("🏠 I'm Home!", "vote_yes")
-    .text("🚶 On the Way", "vote_otw")
-    .row()
-    .text("🫂 Check in on Me", "vote_check");
+  activePolls[chatId] = { votes: {}, totalMembers };
 
   const msg = await ctx.reply(
-    "🏡 *Are You Home Yet?*\n\nLet everyone know how you're doing!",
-    { reply_markup: keyboard, parse_mode: "Markdown" }
+    `🏡 *Are You Home Yet?*\n\n⏳ Waiting for everyone...\n\n🏠 *0/${totalMembers} are home*`,
+    { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
   );
 
-  // Store the message ID so we can edit it later
   activePolls[chatId].messageId = msg.message_id;
 });
 
@@ -41,9 +68,8 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
   const chatId = ctx.chat.id;
   const userId = ctx.from.id;
   const name = ctx.from.first_name;
-  const action = ctx.callbackQuery.data; // vote_yes / vote_otw / vote_check
+  const action = ctx.callbackQuery.data;
 
-  // No active poll
   if (!activePolls[chatId]) {
     await ctx.answerCallbackQuery("No active check-in! Ask the host to start one.");
     return;
@@ -52,24 +78,16 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
   const poll = activePolls[chatId];
   const prevStatus = poll.votes[userId]?.status;
 
-  const statusMap = {
-    vote_yes: "yes",
-    vote_otw: "otw",
-    vote_check: "check",
-  };
-
+  const statusMap = { vote_yes: "yes", vote_otw: "otw", vote_check: "check" };
   const status = statusMap[action];
 
-  // Don't do anything if they tapped the same button again
   if (prevStatus === status) {
     await ctx.answerCallbackQuery("You already selected this! 😊");
     return;
   }
 
-  // Save their vote
   poll.votes[userId] = { name, status };
 
-  // Confirm to the user who tapped
   const confirmMap = {
     yes: "🏠 Got it, glad you're home!",
     otw: "🚶 Got it, safe travels!",
@@ -77,7 +95,6 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
   };
   await ctx.answerCallbackQuery(confirmMap[status]);
 
-  // Send group notification for "yes" and "check" only
   if (status === "yes" && prevStatus !== "yes") {
     await ctx.reply(`🏠 *${name}* is home safe!`, { parse_mode: "Markdown" });
   } else if (status === "check" && prevStatus !== "check") {
@@ -86,15 +103,18 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
     });
   }
 
-  // Check if everyone is home
-  const allVotes = Object.values(poll.votes);
-  const allHome = allVotes.length > 0 && allVotes.every((v) => v.status === "yes");
+  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
+  const allHome = homeCount === poll.totalMembers;
 
   if (allHome) {
-    // Close the poll — remove the buttons
-    await ctx.api.editMessageReplyMarkup(chatId, poll.messageId, {
-      reply_markup: new InlineKeyboard(),
-    });
+    await ctx.api.editMessageText(
+      chatId,
+      poll.messageId,
+      `🏡 *Are You Home Yet?*\n\n` +
+      Object.values(poll.votes).map((v) => `🏠 ${v.name} — I'm Home!`).join("\n") +
+      `\n\n🏠 *${poll.totalMembers}/${poll.totalMembers} are home*\n✅ Check-in closed!`,
+      { parse_mode: "Markdown" }
+    );
 
     delete activePolls[chatId];
 
@@ -102,24 +122,11 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
       parse_mode: "Markdown",
     });
   } else {
-    // Update the poll message to show current status
-    const statusEmoji = { yes: "🏠", otw: "🚶", check: "🫂" };
-    const lines = Object.values(poll.votes)
-      .map((v) => `${statusEmoji[v.status]} ${v.name}`)
-      .join("\n");
-
     await ctx.api.editMessageText(
       chatId,
       poll.messageId,
-      `🏡 *Are You Home Yet?*\n\n${lines}\n\nLet everyone know how you're doing!`,
-      {
-        reply_markup: new InlineKeyboard()
-          .text("🏠 I'm Home!", "vote_yes")
-          .text("🚶 On the Way", "vote_otw")
-          .row()
-          .text("🫂 Check in on Me", "vote_check"),
-        parse_mode: "Markdown",
-      }
+      buildPollText(poll),
+      { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
     );
   }
 });
@@ -139,6 +146,5 @@ bot.command("help", async (ctx) => {
   );
 });
 
-// ── Start bot ──────────────────────────────────────────────────────────────
 bot.start();
 console.log("🏠 HomeSweetHomedBot is running!");
