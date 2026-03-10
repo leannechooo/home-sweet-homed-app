@@ -1,11 +1,15 @@
 import { Bot, InlineKeyboard } from "grammy";
+import http from "http";
 import dotenv from "dotenv";
 dotenv.config();
+
+// ── Keep Render happy with a tiny web server ───────────────────────────────
+const server = http.createServer((req, res) => res.end("HomeSweetHomedBot is running! 🏠"));
+server.listen(process.env.PORT || 3000);
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
 // ── Store active polls in memory ───────────────────────────────────────────
-// { chatId: { messageId, totalMembers, votes: { userId: { name, status } } } }
 const activePolls = {};
 
 // ── Helper: build the poll message text ───────────────────────────────────
@@ -53,7 +57,7 @@ bot.command("checkin", async (ctx) => {
   const rawCount = await ctx.api.getChatMemberCount(chatId);
   const totalMembers = rawCount - 1;
 
-  activePolls[chatId] = { votes: {}, totalMembers };
+  activePolls[chatId] = { votes: {}, totalMembers, hostId: ctx.from.id };
 
   const msg = await ctx.reply(
     `🏡 *Are You Home Yet?*\n\n⏳ Waiting for everyone...\n\n🏠 *0/${totalMembers} are home*`,
@@ -61,6 +65,49 @@ bot.command("checkin", async (ctx) => {
   );
 
   activePolls[chatId].messageId = msg.message_id;
+});
+
+// ── /allhomed command — force close the poll ───────────────────────────────
+bot.command("allhomed", async (ctx) => {
+  const chatId = ctx.chat.id;
+
+  if (!activePolls[chatId]) {
+    await ctx.reply("No active check-in to close! 🏠");
+    return;
+  }
+
+  // Only the host who started the poll can force close it
+  if (ctx.from.id !== activePolls[chatId].hostId) {
+    await ctx.reply("Only the person who started the check-in can force close it! 👑");
+    return;
+  }
+
+  const poll = activePolls[chatId];
+  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
+
+  // Edit the poll message to show it's closed
+  await ctx.api.editMessageText(
+    chatId,
+    poll.messageId,
+    `🏡 *Are You Home Yet?*\n\n` +
+    (Object.keys(poll.votes).length > 0
+      ? Object.values(poll.votes)
+          .map((v) => {
+            const emoji = { yes: "🏠", otw: "🚶", check: "🫂" };
+            const label = { yes: "I'm Home!", otw: "On the Way", check: "Check in on Me" };
+            return `${emoji[v.status]} ${v.name} — ${label[v.status]}`;
+          })
+          .join("\n")
+      : "⏳ No one voted.") +
+    `\n\n🏠 *${homeCount}/${poll.totalMembers} were home*\n✅ Check-in force closed by host.`,
+    { parse_mode: "Markdown" }
+  );
+
+  delete activePolls[chatId];
+
+  await ctx.reply("✅ *Check-in has been force closed by the host.* 🏠", {
+    parse_mode: "Markdown",
+  });
 });
 
 // ── Handle button taps ─────────────────────────────────────────────────────
@@ -136,7 +183,8 @@ bot.command("help", async (ctx) => {
   await ctx.reply(
     "🏠 *Are You Home Yet? Bot*\n\n" +
     "Add me to a group chat and use:\n\n" +
-    "/checkin — Start a check-in for the group\n\n" +
+    "/checkin — Start a check-in for the group\n" +
+    "/allhomed — Force close the check-in (host only)\n\n" +
     "Everyone can then tap:\n" +
     "🏠 I'm Home — when they're safe\n" +
     "🚶 On the Way — still travelling\n" +
@@ -145,10 +193,6 @@ bot.command("help", async (ctx) => {
     { parse_mode: "Markdown" }
   );
 });
-
-// Keep Render's free tier happy by opening a port
-import http from "http";
-http.createServer((req, res) => res.end("Bot is running!")).listen(process.env.PORT || 3000);
 
 bot.start();
 console.log("🏠 HomeSweetHomedBot is running!");
