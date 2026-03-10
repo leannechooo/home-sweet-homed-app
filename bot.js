@@ -1,129 +1,143 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { initializeApp, cert } from "firebase-admin/app";
-import { getDatabase } from "firebase-admin/database";
 import dotenv from "dotenv";
 dotenv.config();
 
-// ── Init Telegram Bot ──────────────────────────────────────────────────────
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// ── Init Firebase Admin ────────────────────────────────────────────────────
-initializeApp({
-  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
-  databaseURL: process.env.FIREBASE_DATABASE_URL,
-});
-const db = getDatabase();
-
-// ── Notification messages ──────────────────────────────────────────────────
-const NOTIFY_ON = ["yes", "check"]; // only notify for these two votes
-
-const MESSAGE = {
-  yes:   (name) => `🏠 *${name}* is home safe!`,
-  check: (name) => `🫂 *${name}* needs help getting home — can someone check in?`,
-};
-
-// ── Track which polls are already being watched ────────────────────────────
-const watchedPolls = new Set();
+// ── Store active polls in memory ───────────────────────────────────────────
+// { chatId: { messageId, votes: { userId: { name, status } } } }
+const activePolls = {};
 
 // ── /checkin command ───────────────────────────────────────────────────────
 bot.command("checkin", async (ctx) => {
   const chatId = ctx.chat.id;
-  const pollId = `poll_${chatId}`;
 
-  // Reset the poll in Firebase
-  await db.ref(`polls/${pollId}`).set({
-    chatId,
-    closed: false,
-    votes: {},
-    createdAt: Date.now(),
-  });
+  // Only works in group chats
+  if (ctx.chat.type === "private") {
+    await ctx.reply("Please add me to a group chat and use /checkin there! 🏠");
+    return;
+  }
 
-  // Send the Mini App button into the group
-  const keyboard = new InlineKeyboard().webApp(
-    "🏠 Open Check-in",
-    process.env.MINI_APP_URL
-  );
+  // Reset poll for this chat
+  activePolls[chatId] = { votes: {} };
 
-  await ctx.reply(
-    "🏡 *Are You Home Yet?*\nTap below to let everyone know you're safe!",
+  const keyboard = new InlineKeyboard()
+    .text("🏠 I'm Home!", "vote_yes")
+    .text("🚶 On the Way", "vote_otw")
+    .row()
+    .text("🫂 Check in on Me", "vote_check");
+
+  const msg = await ctx.reply(
+    "🏡 *Are You Home Yet?*\n\nLet everyone know how you're doing!",
     { reply_markup: keyboard, parse_mode: "Markdown" }
   );
 
-  // Start watching this poll for votes
-  watchPoll(pollId, chatId);
+  // Store the message ID so we can edit it later
+  activePolls[chatId].messageId = msg.message_id;
 });
 
-// ── Watch a poll for vote changes ──────────────────────────────────────────
-function watchPoll(pollId, chatId) {
-  if (watchedPolls.has(pollId)) return;
-  watchedPolls.add(pollId);
+// ── Handle button taps ─────────────────────────────────────────────────────
+bot.callbackQuery(/^vote_/, async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  const name = ctx.from.first_name;
+  const action = ctx.callbackQuery.data; // vote_yes / vote_otw / vote_check
 
-  // Track previous votes so we only notify on NEW relevant votes
-  const previousVotes = {};
+  // No active poll
+  if (!activePolls[chatId]) {
+    await ctx.answerCallbackQuery("No active check-in! Ask the host to start one.");
+    return;
+  }
 
-  const votesRef = db.ref(`polls/${pollId}/votes`);
+  const poll = activePolls[chatId];
+  const prevStatus = poll.votes[userId]?.status;
 
-  votesRef.on("child_added", async (snap) => {
-    const userId = snap.key;
-    const { name, status } = snap.val();
-    previousVotes[userId] = status;
+  const statusMap = {
+    vote_yes: "yes",
+    vote_otw: "otw",
+    vote_check: "check",
+  };
 
-    if (NOTIFY_ON.includes(status)) {
-      await bot.api.sendMessage(chatId, MESSAGE[status](name), {
-        parse_mode: "Markdown",
-      });
-    }
+  const status = statusMap[action];
 
-    await checkAllHome(pollId, chatId);
-  });
+  // Don't do anything if they tapped the same button again
+  if (prevStatus === status) {
+    await ctx.answerCallbackQuery("You already selected this! 😊");
+    return;
+  }
 
-  votesRef.on("child_changed", async (snap) => {
-    const userId = snap.key;
-    const { name, status } = snap.val();
-    const prev = previousVotes[userId];
+  // Save their vote
+  poll.votes[userId] = { name, status };
 
-    // Only notify if this is a NEW vote for "yes" or "check"
-    // and they weren't already in that state
-    if (NOTIFY_ON.includes(status) && prev !== status) {
-      await bot.api.sendMessage(chatId, MESSAGE[status](name), {
-        parse_mode: "Markdown",
-      });
-    }
+  // Confirm to the user who tapped
+  const confirmMap = {
+    yes: "🏠 Got it, glad you're home!",
+    otw: "🚶 Got it, safe travels!",
+    check: "🫂 Got it, someone will check in on you!",
+  };
+  await ctx.answerCallbackQuery(confirmMap[status]);
 
-    previousVotes[userId] = status;
-    await checkAllHome(pollId, chatId);
-  });
-}
+  // Send group notification for "yes" and "check" only
+  if (status === "yes" && prevStatus !== "yes") {
+    await ctx.reply(`🏠 *${name}* is home safe!`, { parse_mode: "Markdown" });
+  } else if (status === "check" && prevStatus !== "check") {
+    await ctx.reply(`🫂 *${name}* needs help getting home — can someone check in?`, {
+      parse_mode: "Markdown",
+    });
+  }
 
-// ── Check if everyone is home ──────────────────────────────────────────────
-async function checkAllHome(pollId, chatId) {
-  const snap = await db.ref(`polls/${pollId}`).get();
-  const data = snap.val();
-
-  if (!data || data.closed) return;
-
-  const votes = data.votes ?? {};
-  const ids = Object.keys(votes);
-  if (ids.length === 0) return;
-
-  const allHome = ids.every((id) => votes[id].status === "yes");
+  // Check if everyone is home
+  const allVotes = Object.values(poll.votes);
+  const allHome = allVotes.length > 0 && allVotes.every((v) => v.status === "yes");
 
   if (allHome) {
-    // Close the poll
-    await db.ref(`polls/${pollId}/closed`).set(true);
+    // Close the poll — remove the buttons
+    await ctx.api.editMessageReplyMarkup(chatId, poll.messageId, {
+      reply_markup: new InlineKeyboard(),
+    });
 
-    // Stop watching
-    db.ref(`polls/${pollId}/votes`).off();
-    watchedPolls.delete(pollId);
+    delete activePolls[chatId];
 
-    // Send the final group message
-    await bot.api.sendMessage(
+    await ctx.reply("🎉 *Everyone's home safe! Check-in closed.* 💚", {
+      parse_mode: "Markdown",
+    });
+  } else {
+    // Update the poll message to show current status
+    const statusEmoji = { yes: "🏠", otw: "🚶", check: "🫂" };
+    const lines = Object.values(poll.votes)
+      .map((v) => `${statusEmoji[v.status]} ${v.name}`)
+      .join("\n");
+
+    await ctx.api.editMessageText(
       chatId,
-      "🎉 *Everyone's home safe! Check\\-in closed\\.* 💚",
-      { parse_mode: "MarkdownV2" }
+      poll.messageId,
+      `🏡 *Are You Home Yet?*\n\n${lines}\n\nLet everyone know how you're doing!`,
+      {
+        reply_markup: new InlineKeyboard()
+          .text("🏠 I'm Home!", "vote_yes")
+          .text("🚶 On the Way", "vote_otw")
+          .row()
+          .text("🫂 Check in on Me", "vote_check"),
+        parse_mode: "Markdown",
+      }
     );
   }
-}
+});
+
+// ── /help command ──────────────────────────────────────────────────────────
+bot.command("help", async (ctx) => {
+  await ctx.reply(
+    "🏠 *Are You Home Yet? Bot*\n\n" +
+    "Add me to a group chat and use:\n\n" +
+    "/checkin — Start a check-in for the group\n\n" +
+    "Everyone can then tap:\n" +
+    "🏠 I'm Home — when they're safe\n" +
+    "🚶 On the Way — still travelling\n" +
+    "🫂 Check in on Me — needs someone to check in\n\n" +
+    "The check-in auto-closes when everyone is home! 💚",
+    { parse_mode: "Markdown" }
+  );
+});
 
 // ── Start bot ──────────────────────────────────────────────────────────────
 bot.start();
