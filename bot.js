@@ -146,5 +146,9 @@ bot.command("help", async (ctx) => {
   );
 });
 
+// Keep Render's free tier happy by opening a port
+import http from "http";
+http.createServer((req, res) => res.end("Bot is running!")).listen(process.env.PORT || 3000);
+
 bot.start();
 console.log("🏠 HomeSweetHomedBot is running!");
