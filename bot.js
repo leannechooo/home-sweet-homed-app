@@ -104,18 +104,14 @@ bot.command("allhomed", async (ctx) => {
   const name = ctx.from.first_name;
 
   if (!activePolls[chatId]) {
-    await ctx.reply("There's no active check\\-in right now\\! Use /checkin to start one\\. 🏠", {
-      parse_mode: "MarkdownV2",
-    });
+    await ctx.reply("There is no active check-in right now! Use /checkin to start one. 🏠");
     return;
   }
 
   const poll = activePolls[chatId];
   await closePoll(chatId, poll, name);
 
-  await ctx.reply(`✅ *Check\\-in has been closed by ${name}\\.* 🏠`, {
-    parse_mode: "MarkdownV2",
-  });
+  await ctx.reply(`✅ Check-in has been closed by ${name}. 🏠`);
 });
 
 // ── Handle button taps ─────────────────────────────────────────────────────
