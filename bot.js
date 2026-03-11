@@ -38,12 +38,19 @@ function buildKeyboard() {
     .text("🫂 Check in on Me", "vote_check");
 }
 
-// ── Helper: build SOS response keyboard ───────────────────────────────────
+// ── Helper: build SOS inline keyboard (I'm Fine only) ─────────────────────
 function buildSOSKeyboard(userId) {
   return new InlineKeyboard()
-    .text("✅ I'm Fine", `sos_fine_${userId}`)
-    .row()
-    .text("📍 Share My Current Location", `sos_location_${userId}`);
+    .text("✅ I'm Fine", `sos_fine_${userId}`);
+}
+
+// ── Helper: build location request reply keyboard ──────────────────────────
+function buildLocationKeyboard() {
+  return {
+    keyboard: [[{ text: "📍 Share My Current Location", request_location: true }]],
+    one_time_keyboard: true,
+    resize_keyboard: true,
+  };
 }
 
 // ── Helper: clear SOS timers for a user ───────────────────────────────────
@@ -152,11 +159,30 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
     // Send SOS notification
     await ctx.reply(`🫂 *${name}* may need help getting home!`, { parse_mode: "Markdown" });
 
-    // Send SOS response message with buttons
+    // Clear any old SOS message if exists, then send fresh one
+    if (activePolls[chatId]?.sosMessageId?.[userId]) {
+      try {
+        await bot.api.editMessageReplyMarkup(chatId, activePolls[chatId].sosMessageId[userId], {
+          reply_markup: new InlineKeyboard()
+        });
+      } catch (e) { /* ignore */ }
+    }
+
+    // Send I'm Fine inline button
     const sosMsg = await ctx.reply(
-      `${name}, are you okay? Let us know or share your current location 👇`,
+      `${name}, are you okay?`,
       { reply_markup: buildSOSKeyboard(userId) }
     );
+
+    // Send separate location request using reply keyboard (opens native location picker)
+    await ctx.reply(
+      `${name}, tap below to share your location with the group 👇`,
+      { reply_markup: buildLocationKeyboard() }
+    );
+
+    // Store SOS message ID so we can clear it on re-vote
+    if (!activePolls[chatId].sosMessageId) activePolls[chatId].sosMessageId = {};
+    activePolls[chatId].sosMessageId[userId] = sosMsg.message_id;
 
     // Set up ping timers — 10 mins then 20 mins
     const firstTimer = setTimeout(async () => {
@@ -233,21 +259,7 @@ bot.callbackQuery(/^sos_fine_/, async (ctx) => {
   await ctx.reply(`✅ *${name}* is okay and on the way home! 🚶`, { parse_mode: "Markdown" });
 });
 
-bot.callbackQuery(/^sos_location_/, async (ctx) => {
-  const userId = ctx.from.id;
-  const targetUserId = parseInt(ctx.callbackQuery.data.replace("sos_location_", ""));
 
-  // Only the person themselves can share location
-  if (userId !== targetUserId) {
-    await ctx.answerCallbackQuery("Only the person who needs help can share their location! 😊");
-    return;
-  }
-
-  await ctx.answerCallbackQuery(
-    "Open the attachment menu in this chat (📎) → Location → Send Current Location 📍",
-    { show_alert: true }
-  );
-});
 
 // ── Handle incoming live location ──────────────────────────────────────────
 bot.on("message:location", async (ctx) => {
