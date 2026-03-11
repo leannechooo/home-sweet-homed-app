@@ -24,7 +24,7 @@ function buildPollText(poll) {
     .join("\n");
   const notVotedCount = total - Object.keys(poll.votes).length;
   const waiting = notVotedCount > 0
-    ? "\n" + [...Array(notVotedCount)].map(() => "⏳ Waiting...").join("\n")
+    ? "\n" + [...Array(notVotedCount)].map(() => "⏳ Pending Response...").join("\n")
     : "";
   return `🏡 *Are You Home Yet?*\n\n${voted}${waiting}\n\n🏠 *${homeCount}/${total} are home*`;
 }
