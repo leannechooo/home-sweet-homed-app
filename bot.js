@@ -38,19 +38,18 @@ function buildKeyboard() {
     .text("🫂 Check in on Me", "vote_check");
 }
 
-// ── Helper: build SOS inline keyboard (I'm Fine only) ─────────────────────
-function buildSOSKeyboard(userId) {
-  return new InlineKeyboard()
-    .text("✅ I'm Fine", `sos_fine_${userId}`);
-}
-
-// ── Helper: build location request reply keyboard ──────────────────────────
-function buildLocationKeyboard() {
-  return {
-    keyboard: [[{ text: "📍 Share My Current Location", request_location: true }]],
-    one_time_keyboard: true,
-    resize_keyboard: true,
-  };
+// ── Helper: build SOS group keyboard ──────────────────────────────────────
+function buildSOSKeyboard(userId, name, username) {
+  const keyboard = new InlineKeyboard()
+    .text(`✅ ${name} is Safe`, `sos_safe_${userId}`);
+  
+  // Add call button — links to profile if username exists, otherwise uses tg://user
+  const profileUrl = username
+    ? `https://t.me/${username}`
+    : `tg://user?id=${userId}`;
+  
+  keyboard.url(`📞 Call ${name}`, profileUrl);
+  return keyboard;
 }
 
 // ── Helper: clear SOS timers for a user ───────────────────────────────────
@@ -168,16 +167,11 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
       } catch (e) { /* ignore */ }
     }
 
-    // Send I'm Fine inline button
+    // Send SOS distress message with group response buttons
+    const username = ctx.from.username ?? null;
     const sosMsg = await ctx.reply(
-      `${name}, are you okay?`,
-      { reply_markup: buildSOSKeyboard(userId) }
-    );
-
-    // Send separate location request using reply keyboard (opens native location picker)
-    await ctx.reply(
-      `${name}, tap below to share your location with the group 👇`,
-      { reply_markup: buildLocationKeyboard() }
+      `🚨 *${name}* may need help getting home!\nCan someone reach out to them?`,
+      { reply_markup: buildSOSKeyboard(userId, name, username), parse_mode: "Markdown" }
     );
 
     // Store SOS message ID so we can clear it on re-vote
@@ -224,21 +218,23 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
 });
 
 // ── Handle SOS response buttons ────────────────────────────────────────────
-bot.callbackQuery(/^sos_fine_/, async (ctx) => {
+bot.callbackQuery(/^sos_safe_/, async (ctx) => {
   const chatId = ctx.chat.id;
-  const userId = ctx.from.id;
-  const targetUserId = parseInt(ctx.callbackQuery.data.replace("sos_fine_", ""));
+  const confirmedBy = ctx.from.first_name;
+  const targetUserId = parseInt(ctx.callbackQuery.data.replace("sos_safe_", ""));
 
-  // Only the person themselves can tap I'm Fine
-  if (userId !== targetUserId) {
-    await ctx.answerCallbackQuery("Only the person who needs help can respond to this! 😊");
+  const poll = activePolls[chatId];
+  if (!poll) {
+    await ctx.answerCallbackQuery("This check-in has expired! 🏠");
     return;
   }
 
-  const name = ctx.from.first_name;
-  clearSOSTimers(userId);
+  // Get the name of the person who needs help
+  const targetVote = poll.votes[targetUserId];
+  const targetName = targetVote?.name ?? "They";
 
-  await ctx.answerCallbackQuery("Glad you're okay! 💚");
+  clearSOSTimers(targetUserId);
+  await ctx.answerCallbackQuery(`💚 Thanks for confirming!`);
 
   // Remove SOS buttons
   try {
@@ -246,37 +242,24 @@ bot.callbackQuery(/^sos_fine_/, async (ctx) => {
   } catch (e) { /* ignore */ }
 
   // Switch their vote to On the Way
-  if (activePolls[chatId]) {
-    activePolls[chatId].votes[userId] = { name, status: "otw" };
-    await ctx.api.editMessageText(
-      chatId,
-      activePolls[chatId].messageId,
-      buildPollText(activePolls[chatId]),
-      { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
-    );
-  }
+  poll.votes[targetUserId] = { name: targetName, status: "otw" };
 
-  await ctx.reply(`✅ *${name}* is okay and on the way home! 🚶`, { parse_mode: "Markdown" });
+  await ctx.api.editMessageText(
+    chatId,
+    poll.messageId,
+    buildPollText(poll),
+    { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
+  );
+
+  await ctx.reply(
+    `💚 *${targetName}* has been confirmed safe by ${confirmedBy}! They are on the way home 🚶`,
+    { parse_mode: "Markdown" }
+  );
 });
 
 
 
-// ── Handle incoming live location ──────────────────────────────────────────
-bot.on("message:location", async (ctx) => {
-  const userId = ctx.from.id;
-  const name = ctx.from.first_name;
-  const chatId = ctx.chat.id;
-  const location = ctx.message.location;
 
-  // If this user had an SOS active, any location counts
-  if (sosTimers[userId]) {
-    clearSOSTimers(userId);
-    await ctx.reply(
-      `📍 *${name}* has shared their current location. Someone go help them! 💚`,
-      { parse_mode: "Markdown" }
-    );
-  }
-});
 
 // ── /help command ──────────────────────────────────────────────────────────
 bot.command("help", async (ctx) => {
@@ -289,7 +272,7 @@ bot.command("help", async (ctx) => {
     "Tap a button to respond:\n" +
     "🏠 I'm Home — you're safe\n" +
     "🚶 On the Way — still travelling\n" +
-    "🫂 Check in on Me — need help, share your current location\n\n" +
+    "🫂 Check in on Me — alerts group, someone can confirm you're safe or call you\n\n" +
     "The check-in auto-closes when everyone is home! 💚",
     { parse_mode: "Markdown" }
   );
