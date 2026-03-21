@@ -29,7 +29,15 @@ async function savePoll(chatId, data) {
 }
 
 async function updateVote(chatId, userId, name, status) {
-  await db.ref(`polls/${chatId}/votes/${userId}`).set({ name, status });
+ git add .
+git commit -m "fix: retry on 409 conflict instead of crashing"
+git push
+```
+
+Now instead of crashing, the bot will wait 5 seconds and retry until the old instance fully shuts down. You should see in the logs:
+```
+⚠️ Conflict detected, retrying in 5 seconds...
+✅ Bot started successfully await db.ref(`polls/${chatId}/votes/${userId}`).set({ name, status });
 }
 
 async function closePollInDB(chatId) {
