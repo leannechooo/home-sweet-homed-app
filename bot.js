@@ -283,11 +283,11 @@ bot.command("checkin", async (ctx) => {
   const setupLink = `https://t.me/${ctx.me.username}?start=setup`;
   await ctx.reply(
     `📍 *Enable location sharing for emergencies*\n\n` +
-    `If you ever need help getting home, I can share your location with *${groupName}* privately\\.\n\n` +
-    `Tap below to set up \\(one time only\\) 👇`,
+    `New here? Start a private chat with me so I can share your location with *${groupName}* if you ever need help getting home\.\n\n` +
+    `Already set up? You can ignore this 😊`,
     {
       parse_mode: "MarkdownV2",
-      reply_markup: new InlineKeyboard().url("💬 Set Up Now", setupLink),
+      reply_markup: new InlineKeyboard().url("💬 Set Up Now \(first time only\)", setupLink),
     }
   );
 });
@@ -443,6 +443,24 @@ bot.callbackQuery(/^sos_safe_/, async (ctx) => {
   );
 });
 
+// ── /setup command ────────────────────────────────────────────────────────
+bot.command("setup", async (ctx) => {
+  const setupLink = `https://t.me/${ctx.me.username}?start=setup`;
+  await ctx.reply(
+    "📍 *Enable location sharing*
+
+" +
+    "Tap below to start a private chat with me. This lets me share your location with your group if you ever tap 🫂 Check in on Me.
+
+" +
+    "_(One time setup only!)_",
+    {
+      parse_mode: "Markdown",
+      reply_markup: new InlineKeyboard().url("💬 Set Up Now", setupLink),
+    }
+  );
+});
+
 // ── /help command ──────────────────────────────────────────────────────────
 bot.command("help", async (ctx) => {
   await ctx.reply(
@@ -450,11 +468,13 @@ bot.command("help", async (ctx) => {
     "Use these commands in your group chat:\n\n" +
     "/checkin — Start a check-in for the group\n" +
     "/allhomed — Force close the current check-in\n" +
+    "/setup — Enable location sharing for emergencies\n" +
     "/help — Show this message\n\n" +
     "Tap a button to respond:\n" +
     "🏠 I'm Home — you're safe\n" +
     "🚶 On the Way — still travelling\n" +
-    "🫂 Check in on Me — alerts group + share location option\n\n" +
+    "🫂 Check in on Me — alerts group + share location option\n" +
+    "_(Use /setup first to enable location sharing)_\n\n" +
     "The check-in auto-closes when everyone is home! 💚\n\n" +
     "🛠 Bot issues? Contact @leannechoo on Telegram.",
     { parse_mode: "Markdown" }
