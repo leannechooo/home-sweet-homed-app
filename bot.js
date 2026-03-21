@@ -7,9 +7,15 @@ dotenv.config();
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// ── Keep Render happy ──────────────────────────────────────────────────────
-const server = http.createServer((req, res) => res.end("HomeSweetHomedBot is running! 🏠"));
-server.listen(process.env.PORT || 3000);
+// ── Keep Render happy — must bind port FIRST before anything else ──────────
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("HomeSweetHomedBot is running! 🏠");
+});
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Web server listening on port ${PORT}`);
+});
 
 // ── Firebase Admin init ────────────────────────────────────────────────────
 initializeApp({
@@ -29,15 +35,7 @@ async function savePoll(chatId, data) {
 }
 
 async function updateVote(chatId, userId, name, status) {
- git add .
-git commit -m "fix: retry on 409 conflict instead of crashing"
-git push
-```
-
-Now instead of crashing, the bot will wait 5 seconds and retry until the old instance fully shuts down. You should see in the logs:
-```
-⚠️ Conflict detected, retrying in 5 seconds...
-✅ Bot started successfully await db.ref(`polls/${chatId}/votes/${userId}`).set({ name, status });
+  await db.ref(`polls/${chatId}/votes/${userId}`).set({ name, status });
 }
 
 async function closePollInDB(chatId) {
