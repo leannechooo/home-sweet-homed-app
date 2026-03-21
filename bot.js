@@ -446,21 +446,12 @@ bot.callbackQuery(/^sos_safe_/, async (ctx) => {
 // ── /setup command ────────────────────────────────────────────────────────
 bot.command("setup", async (ctx) => {
   const setupLink = `https://t.me/${ctx.me.username}?start=setup`;
-  await ctx.reply(
-    "📍 *Enable location sharing*
-
-" +
-    "Tap below to start a private chat with me. This lets me share your location with your group if you ever tap 🫂 Check in on Me.
-
-" +
-    "_(One time setup only!)_",
-    {
-      parse_mode: "Markdown",
-      reply_markup: new InlineKeyboard().url("💬 Set Up Now", setupLink),
-    }
-  );
+  const msg = "📍 *Enable location sharing*\n\nTap below to start a private chat with me. This lets me share your location with your group if you ever tap 🫂 Check in on Me.\n\n_(One time setup only!)_";
+  await ctx.reply(msg, {
+    parse_mode: "Markdown",
+    reply_markup: new InlineKeyboard().url("💬 Set Up Now", setupLink),
+  });
 });
-
 // ── /help command ──────────────────────────────────────────────────────────
 bot.command("help", async (ctx) => {
   await ctx.reply(
@@ -482,5 +473,25 @@ bot.command("help", async (ctx) => {
 });
 
 // ── Start bot ──────────────────────────────────────────────────────────────
-bot.start();
-console.log("🏠 HomeSweetHomedBot is running!");
+bot.catch((err) => {
+  console.error("Bot error:", err.message);
+});
+
+async function startBot() {
+  try {
+    console.log("🏠 HomeSweetHomedBot is running!");
+    await bot.start({
+      onStart: () => console.log("✅ Bot started successfully"),
+    });
+  } catch (err) {
+    if (err.error_code === 409) {
+      console.log("⚠️ Conflict detected, retrying in 5 seconds...");
+      setTimeout(startBot, 5000);
+    } else {
+      console.error("Fatal error:", err);
+      process.exit(1);
+    }
+  }
+}
+
+startBot();
