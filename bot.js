@@ -1,30 +1,113 @@
 import { Bot, InlineKeyboard } from "grammy";
+import { initializeApp, cert } from "firebase-admin/app";
+import { getDatabase } from "firebase-admin/database";
 import http from "http";
 import dotenv from "dotenv";
 dotenv.config();
+
+const bot = new Bot(process.env.BOT_TOKEN);
 
 // ── Keep Render happy ──────────────────────────────────────────────────────
 const server = http.createServer((req, res) => res.end("HomeSweetHomedBot is running! 🏠"));
 server.listen(process.env.PORT || 3000);
 
-const bot = new Bot(process.env.BOT_TOKEN);
+// ── Firebase Admin init ────────────────────────────────────────────────────
+initializeApp({
+  credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+  databaseURL: process.env.FIREBASE_DATABASE_URL,
+});
+const db = getDatabase();
 
-// ── In-memory storage ──────────────────────────────────────────────────────
-const activePolls = {};   // { chatId: { votes, totalMembers, messageId, groupName } }
-const sosTimers = {};     // { userId: { first, second } }
-const setupUsers = new Set(); // userIds who have done private chat setup
-const pendingSOS = {};    // { userId: chatId } — who triggered SOS and which group
+// ── Firebase helpers ───────────────────────────────────────────────────────
+async function getPoll(chatId) {
+  const snap = await db.ref(`polls/${chatId}`).get();
+  return snap.exists() ? snap.val() : null;
+}
+
+async function savePoll(chatId, data) {
+  await db.ref(`polls/${chatId}`).set(data);
+}
+
+async function updateVote(chatId, userId, name, status) {
+  await db.ref(`polls/${chatId}/votes/${userId}`).set({ name, status });
+}
+
+async function closePollInDB(chatId) {
+  await db.ref(`polls/${chatId}/closed`).set(true);
+}
+
+async function deletePoll(chatId) {
+  await db.ref(`polls/${chatId}`).remove();
+}
+
+async function isSetup(userId) {
+  const snap = await db.ref(`setupUsers/${userId}`).get();
+  return snap.exists();
+}
+
+async function markSetup(userId) {
+  await db.ref(`setupUsers/${userId}`).set(true);
+}
+
+async function getPendingSOS(userId) {
+  const snap = await db.ref(`pendingSOS/${userId}`).get();
+  return snap.exists() ? snap.val() : null;
+}
+
+async function setPendingSOS(userId, chatId) {
+  await db.ref(`pendingSOS/${userId}`).set(chatId);
+}
+
+async function clearPendingSOS(userId) {
+  await db.ref(`pendingSOS/${userId}`).remove();
+}
+
+// ── In-memory SOS timers (these don't need to survive restarts) ────────────
+const sosTimers = {};
+
+function clearSOSTimers(userId) {
+  if (sosTimers[userId]) {
+    clearTimeout(sosTimers[userId].first);
+    clearTimeout(sosTimers[userId].second);
+    delete sosTimers[userId];
+  }
+}
+
+function startSOSTimers(userId, chatId, name) {
+  clearSOSTimers(userId);
+  const firstTimer = setTimeout(async () => {
+    if (sosTimers[userId]) {
+      await bot.api.sendMessage(chatId,
+        `⚠️ *${name}* hasn't responded yet — can someone reach out?`,
+        { parse_mode: "Markdown" }
+      );
+    }
+  }, 10 * 60 * 1000);
+
+  const secondTimer = setTimeout(async () => {
+    if (sosTimers[userId]) {
+      await bot.api.sendMessage(chatId,
+        `🚨 *${name}* still hasn't responded — please check in on them urgently!`,
+        { parse_mode: "Markdown" }
+      );
+      delete sosTimers[userId];
+    }
+  }, 20 * 60 * 1000);
+
+  sosTimers[userId] = { first: firstTimer, second: secondTimer };
+}
 
 // ── Helper: build poll message text ───────────────────────────────────────
 function buildPollText(poll) {
   const statusEmoji = { yes: "🏠", otw: "🚶", check: "🫂" };
   const statusLabel = { yes: "I'm Home!", otw: "On the Way", check: "Check in on Me" };
-  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
+  const votes = poll.votes ?? {};
+  const homeCount = Object.values(votes).filter((v) => v.status === "yes").length;
   const total = poll.totalMembers;
-  const voted = Object.values(poll.votes)
+  const voted = Object.values(votes)
     .map((v) => `${statusEmoji[v.status]} ${v.name} — ${statusLabel[v.status]}`)
     .join("\n");
-  const notVotedCount = total - Object.keys(poll.votes).length;
+  const notVotedCount = total - Object.keys(votes).length;
   const waiting = notVotedCount > 0
     ? "\n" + [...Array(notVotedCount)].map(() => "⏳ Waiting...").join("\n")
     : "";
@@ -40,7 +123,7 @@ function buildKeyboard() {
     .text("🫂 Check in on Me", "vote_check");
 }
 
-// ── Helper: build SOS group keyboard ──────────────────────────────────────
+// ── Helper: build SOS keyboard ─────────────────────────────────────────────
 function buildSOSKeyboard(userId, name, username) {
   const profileUrl = username ? `https://t.me/${username}` : `tg://user?id=${userId}`;
   return new InlineKeyboard()
@@ -48,50 +131,14 @@ function buildSOSKeyboard(userId, name, username) {
     .url(`📞 Call ${name}`, profileUrl);
 }
 
-// ── Helper: clear SOS timers ───────────────────────────────────────────────
-function clearSOSTimers(userId) {
-  if (sosTimers[userId]) {
-    clearTimeout(sosTimers[userId].first);
-    clearTimeout(sosTimers[userId].second);
-    delete sosTimers[userId];
-  }
-}
-
-// ── Helper: start SOS ping timers ─────────────────────────────────────────
-function startSOSTimers(userId, chatId, name) {
-  clearSOSTimers(userId); // clear any existing timers first
-
-  const firstTimer = setTimeout(async () => {
-    if (sosTimers[userId]) {
-      await bot.api.sendMessage(
-        chatId,
-        `⚠️ *${name}* hasn't responded yet — can someone reach out?`,
-        { parse_mode: "Markdown" }
-      );
-    }
-  }, 10 * 60 * 1000);
-
-  const secondTimer = setTimeout(async () => {
-    if (sosTimers[userId]) {
-      await bot.api.sendMessage(
-        chatId,
-        `🚨 *${name}* still hasn't responded — please check in on them urgently!`,
-        { parse_mode: "Markdown" }
-      );
-      delete sosTimers[userId];
-    }
-  }, 20 * 60 * 1000);
-
-  sosTimers[userId] = { first: firstTimer, second: secondTimer, chatId, name };
-}
-
-// ── Helper: close a poll cleanly ──────────────────────────────────────────
+// ── Helper: close poll cleanly ─────────────────────────────────────────────
 async function closePoll(chatId, poll, closedBy) {
   const statusEmoji = { yes: "🏠", otw: "🚶", check: "🫂" };
   const statusLabel = { yes: "I'm Home!", otw: "On the Way", check: "Check in on Me" };
-  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
-  const summary = Object.keys(poll.votes).length > 0
-    ? Object.values(poll.votes)
+  const votes = poll.votes ?? {};
+  const homeCount = Object.values(votes).filter((v) => v.status === "yes").length;
+  const summary = Object.keys(votes).length > 0
+    ? Object.values(votes)
         .map((v) => `${statusEmoji[v.status]} ${v.name} — ${statusLabel[v.status]}`)
         .join("\n")
     : "No one voted.";
@@ -103,17 +150,16 @@ async function closePoll(chatId, poll, closedBy) {
       { parse_mode: "Markdown" }
     );
   } catch (e) { /* already edited — ignore */ }
-  delete activePolls[chatId];
+  await deletePoll(chatId);
 }
 
 // ── /start command (private chat) ─────────────────────────────────────────
 bot.command("start", async (ctx) => {
   const userId = ctx.from.id;
-  const param = ctx.match; // text after /start
+  const param = ctx.match;
 
-  // ── Setup flow ──────────────────────────────────────────────────────────
   if (!param || param === "setup") {
-    setupUsers.add(userId);
+    await markSetup(userId);
     await ctx.reply(
       "✅ You're all set!\n\nIf you ever tap 🫂 Check in on Me during a check-in, " +
       "I'll ask for your location here privately and share it with your group automatically. 💚"
@@ -121,23 +167,17 @@ bot.command("start", async (ctx) => {
     return;
   }
 
-  // ── SOS location request flow ───────────────────────────────────────────
   if (param.startsWith("sos_")) {
     const targetUserId = parseInt(param.replace("sos_", ""));
-
-    // Make sure it's the right person opening this link
     if (userId !== targetUserId) {
       await ctx.reply("This link is meant for someone else! 😊");
       return;
     }
 
-    // Mark as setup since they opened the private chat
-    setupUsers.add(userId);
-
-    const chatId = pendingSOS[userId];
-    const groupName = chatId && activePolls[chatId]?.groupName
-      ? activePolls[chatId].groupName
-      : "your group";
+    await markSetup(userId);
+    const chatId = await getPendingSOS(userId);
+    const poll = chatId ? await getPoll(chatId) : null;
+    const groupName = poll?.groupName ?? "your group";
 
     await ctx.reply(
       `Hi ${ctx.from.first_name}! 💛\n\n` +
@@ -155,8 +195,7 @@ bot.command("start", async (ctx) => {
     return;
   }
 
-  // Default /start (no param)
-  setupUsers.add(userId);
+  await markSetup(userId);
   await ctx.reply(
     "🏠 *Are You Home Yet? Bot*\n\n" +
     "You're all set up! Add me to a group chat and use /checkin to start a check-in.\n\n" +
@@ -169,46 +208,38 @@ bot.command("start", async (ctx) => {
 bot.on("message:location", async (ctx) => {
   const userId = ctx.from.id;
   const name = ctx.from.first_name;
-
-  // Only handle in private chat
   if (ctx.chat.type !== "private") return;
 
-  const chatId = pendingSOS[userId];
+  const chatId = await getPendingSOS(userId);
   if (!chatId) {
     await ctx.reply("Thanks for sharing! No active SOS found — you're all good. 🏠");
     return;
   }
 
-  // Clear SOS timers — location received, no need to ping
   clearSOSTimers(userId);
-  delete pendingSOS[userId];
+  await clearPendingSOS(userId);
 
-  const groupName = activePolls[chatId]?.groupName ?? "your group";
+  const poll = await getPoll(chatId);
+  const groupName = poll?.groupName ?? "your group";
 
-  // Remove the location keyboard
   await ctx.reply(
     `✅ Got it! Sharing your location with *${groupName}* now. Stay safe! 💚`,
     { parse_mode: "Markdown", reply_markup: { remove_keyboard: true } }
   );
 
-  // Forward location pin to the group
   await bot.api.sendLocation(chatId, ctx.message.location.latitude, ctx.message.location.longitude);
-
-  // Send a message to the group explaining the pin
-  await bot.api.sendMessage(
-    chatId,
-    `📍 *${name}*'s location has been shared with *${groupName}*\\. Go help them! 💚`,
+  await bot.api.sendMessage(chatId,
+    `📍 *${name}*'s location has been shared with *${groupName}*. Go help them! 💚`,
     { parse_mode: "Markdown" }
   );
 
-  // Update their vote to On the Way
-  if (activePolls[chatId]?.votes[userId]) {
-    activePolls[chatId].votes[userId].status = "otw";
+  if (poll?.votes?.[userId]) {
+    await updateVote(chatId, userId, name, "otw");
+    const updatedPoll = await getPoll(chatId);
     try {
       await bot.api.editMessageText(
-        chatId,
-        activePolls[chatId].messageId,
-        buildPollText(activePolls[chatId]),
+        chatId, poll.messageId,
+        buildPollText(updatedPoll),
         { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
       );
     } catch (e) { /* ignore */ }
@@ -218,35 +249,35 @@ bot.on("message:location", async (ctx) => {
 // ── /checkin command ───────────────────────────────────────────────────────
 bot.command("checkin", async (ctx) => {
   const chatId = ctx.chat.id;
-
   if (ctx.chat.type === "private") {
     await ctx.reply("Please add me to a group chat and use /checkin there! 🏠");
     return;
   }
 
-  // Close any existing poll
-  if (activePolls[chatId]) {
-    await closePoll(chatId, activePolls[chatId], null);
-  }
+  const existing = await getPoll(chatId);
+  if (existing) await closePoll(chatId, existing, null);
 
   const rawCount = await ctx.api.getChatMemberCount(chatId);
   const totalMembers = rawCount - 1;
   const groupName = ctx.chat.title ?? "your group";
-
-  activePolls[chatId] = { votes: {}, totalMembers, groupName };
 
   const msg = await ctx.reply(
     `🏡 *Are You Home Yet?*\n\n⏳ Waiting for everyone...\n\n🏠 *0/${totalMembers} are home*`,
     { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
   );
 
-  activePolls[chatId].messageId = msg.message_id;
+  await savePoll(chatId, {
+    votes: {},
+    totalMembers,
+    groupName,
+    messageId: msg.message_id,
+    closed: false,
+  });
 
-  // Remind everyone to set up private chat for location sharing
   const setupLink = `https://t.me/${ctx.me.username}?start=setup`;
   await ctx.reply(
     `📍 *Enable location sharing for emergencies*\n\n` +
-    `If you ever need help getting home, I can share your location with *${groupName}* privately.\n\n` +
+    `If you ever need help getting home, I can share your location with *${groupName}* privately\\.\n\n` +
     `Tap below to set up \\(one time only\\) 👇`,
     {
       parse_mode: "MarkdownV2",
@@ -259,11 +290,11 @@ bot.command("checkin", async (ctx) => {
 bot.command("allhomed", async (ctx) => {
   const chatId = ctx.chat.id;
   const name = ctx.from.first_name;
-  if (!activePolls[chatId]) {
+  const poll = await getPoll(chatId);
+  if (!poll) {
     await ctx.reply("There is no active check-in right now! Use /checkin to start one. 🏠");
     return;
   }
-  const poll = activePolls[chatId];
   await closePoll(chatId, poll, name);
   await ctx.reply(`✅ Check-in has been closed by ${name}. 🏠`);
 });
@@ -275,13 +306,14 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
   const name = ctx.from.first_name;
   const action = ctx.callbackQuery.data;
 
-  if (!activePolls[chatId]) {
+  const poll = await getPoll(chatId);
+  if (!poll || poll.closed) {
     await ctx.answerCallbackQuery("This check-in has expired. Ask someone to type /checkin! 🏠");
     return;
   }
 
-  const poll = activePolls[chatId];
-  const prevStatus = poll.votes[userId]?.status;
+  const votes = poll.votes ?? {};
+  const prevStatus = votes[userId]?.status;
   const statusMap = { vote_yes: "yes", vote_otw: "otw", vote_check: "check" };
   const status = statusMap[action];
 
@@ -290,37 +322,34 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
     return;
   }
 
-  poll.votes[userId] = { name, status };
-
   // Answer callback INSTANTLY so button stops spinning right away
   const confirmMap = {
     yes: "🏠 Got it, glad you're home!",
     otw: "🚶 Got it, safe travels!",
     check: "🫂 Got it, we'll keep an eye out for you!",
   };
-  await ctx.answerCallbackQuery(confirmMap[status]); // ← happens first, before any edits
+  await ctx.answerCallbackQuery(confirmMap[status]);
 
-  // Clear SOS timers if they changed away from check
+  // Save vote to Firebase
+  await updateVote(chatId, userId, name, status);
+
+  // Clear SOS if changed away from check
   if (prevStatus === "check" && status !== "check") {
     clearSOSTimers(userId);
-    delete pendingSOS[userId];
+    await clearPendingSOS(userId);
   }
 
   // Notifications
   if (status === "yes" && prevStatus !== "yes") {
     await ctx.reply(`🏠 *${name}* is home safe!`, { parse_mode: "Markdown" });
   } else if (status === "check" && prevStatus !== "check") {
-    // Send distress alert
     await ctx.reply(`🚨 *${name}* may need help getting home!`, { parse_mode: "Markdown" });
 
-    // Store pending SOS so private chat knows which group to forward to
-    pendingSOS[userId] = chatId;
-
+    await setPendingSOS(userId, chatId);
     const username = ctx.from.username ?? null;
+    const userSetup = await isSetup(userId);
 
-    // Check if user has done private setup
-    if (setupUsers.has(userId)) {
-      // User has set up — send deep link to open private chat for location
+    if (userSetup) {
       const sosLink = `https://t.me/${ctx.me.username}?start=sos_${userId}`;
       await ctx.reply(
         `${name}, share your location with *${poll.groupName}* privately 👇\n_(Tap the button below)_`,
@@ -334,7 +363,6 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
         }
       );
     } else {
-      // User hasn't set up — show setup reminder + safe/call buttons
       const setupLink = `https://t.me/${ctx.me.username}?start=setup`;
       await ctx.reply(
         `${name} hasn't set up location sharing yet.\n\n` +
@@ -350,23 +378,26 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
       );
     }
 
-    // Start SOS timers as backup regardless of setup status
     startSOSTimers(userId, chatId, name);
   }
 
-  // Check if everyone is home
-  const homeCount = Object.values(poll.votes).filter((v) => v.status === "yes").length;
+  // Get updated poll and check if everyone is home
+  const updatedPoll = await getPoll(chatId);
+  const updatedVotes = updatedPoll?.votes ?? {};
+  const homeCount = Object.values(updatedVotes).filter((v) => v.status === "yes").length;
   const allHome = homeCount === poll.totalMembers;
 
   if (allHome) {
-    await closePoll(chatId, poll, null);
+    await closePoll(chatId, updatedPoll, null);
     await ctx.reply("🎉 *Everyone's home safe! Check-in closed.* 💚", { parse_mode: "Markdown" });
   } else {
-    await ctx.api.editMessageText(
-      chatId, poll.messageId,
-      buildPollText(poll),
-      { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
-    );
+    try {
+      await bot.api.editMessageText(
+        chatId, poll.messageId,
+        buildPollText(updatedPoll),
+        { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
+      );
+    } catch (e) { /* ignore */ }
   }
 });
 
@@ -376,32 +407,29 @@ bot.callbackQuery(/^sos_safe_/, async (ctx) => {
   const confirmedBy = ctx.from.first_name;
   const targetUserId = parseInt(ctx.callbackQuery.data.replace("sos_safe_", ""));
 
-  const poll = activePolls[chatId];
+  const poll = await getPoll(chatId);
   if (!poll) {
     await ctx.answerCallbackQuery("This check-in has expired! 🏠");
     return;
   }
 
-  const targetVote = poll.votes[targetUserId];
-  const targetName = targetVote?.name ?? "They";
-
+  const targetName = poll.votes?.[targetUserId]?.name ?? "They";
   clearSOSTimers(targetUserId);
-  delete pendingSOS[targetUserId];
+  await clearPendingSOS(targetUserId);
 
-  await ctx.answerCallbackQuery(`💚 Thanks for confirming!`);
+  await ctx.answerCallbackQuery("💚 Thanks for confirming!");
+  try { await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() }); } catch (e) {}
+
+  await updateVote(chatId, targetUserId, targetName, "otw");
+  const updatedPoll = await getPoll(chatId);
 
   try {
-    await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
-  } catch (e) { /* ignore */ }
-
-  // Switch vote to On the Way
-  poll.votes[targetUserId] = { name: targetName, status: "otw" };
-
-  await ctx.api.editMessageText(
-    chatId, poll.messageId,
-    buildPollText(poll),
-    { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
-  );
+    await bot.api.editMessageText(
+      chatId, poll.messageId,
+      buildPollText(updatedPoll),
+      { reply_markup: buildKeyboard(), parse_mode: "Markdown" }
+    );
+  } catch (e) {}
 
   await ctx.reply(
     `💚 *${targetName}* has been confirmed safe by ${confirmedBy}! They are on the way home 🚶`,

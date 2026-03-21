@@ -6,7 +6,8 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "grammy": "^1.21.1",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "firebase-admin": "^13.7.0",
+    "grammy": "^1.21.1"
   }
 }
