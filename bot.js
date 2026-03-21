@@ -292,12 +292,13 @@ bot.callbackQuery(/^vote_/, async (ctx) => {
 
   poll.votes[userId] = { name, status };
 
+  // Answer callback INSTANTLY so button stops spinning right away
   const confirmMap = {
     yes: "🏠 Got it, glad you're home!",
     otw: "🚶 Got it, safe travels!",
     check: "🫂 Got it, we'll keep an eye out for you!",
   };
-  await ctx.answerCallbackQuery(confirmMap[status]);
+  await ctx.answerCallbackQuery(confirmMap[status]); // ← happens first, before any edits
 
   // Clear SOS timers if they changed away from check
   if (prevStatus === "check" && status !== "check") {
