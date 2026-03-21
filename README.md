@@ -80,7 +80,7 @@ node bot.js
 
 ## Contact
 
-Bot issues or feedback? Contact [@leannechoo](https://t.me/leannechoo) on Telegram.
+Bot issues or feedback? Contact leanne.choo.ooo@gmail.com
 
 ---
 
